@@ -1,7 +1,7 @@
 # Smol Historical LLM
 
 <p align="center">
-  <img src="assets/smol-historical-llm-logo.png" alt="AI-generated Smol Historical LLM logo" width="500"/>
+  <img src="assets/smol-historical-llm-logo.png" alt="AI-generated Smol Historical LLM logo" width="200"/>
 </p>
 
 <p align="center">
