@@ -1,0 +1,50 @@
+<component name="InspectionProjectProfileManager">
+  <profile version="1.0">
+    <option name="myName" value="Project Default" />
+    <inspection_tool class="DuplicatedCode" enabled="true" level="WEAK WARNING" enabled_by_default="true">
+      <Languages>
+        <language minSize="73" name="Python" />
+      </Languages>
+    </inspection_tool>
+    <inspection_tool class="PyPackageRequirementsInspection" enabled="false" level="WARNING" enabled_by_default="false">
+      <option name="ignoredPackages">
+        <list>
+          <option value="beautifulsoup4" />
+          <option value="pycld2" />
+          <option value="colorama" />
+          <option value="epub" />
+          <option value="evaluate" />
+          <option value="huggingface_hub" />
+          <option value="dask" />
+          <option value="sentence_transformers" />
+          <option value="jsonschema" />
+          <option value="importlib_resources" />
+          <option value="sentence-transformers" />
+          <option value="jsonlines" />
+          <option value="langdetect" />
+          <option value="pandas" />
+          <option value="pybloomfiltermmap3" />
+          <option value="pysbd" />
+          <option value="python-dotenv" />
+          <option value="PyYAML" />
+          <option value="scikit_learn" />
+          <option value="spacy" />
+          <option value="tiktoken" />
+          <option value="tqdm" />
+          <option value="trl" />
+          <option value="boto3" />
+          <option value="s3fs" />
+          <option value="jiwer" />
+          <option value="dkpro-cassis" />
+          <option value="dvc" />
+          <option value="dvc_s3" />
+          <option value="chonkie" />
+          <option value="levenshtein" />
+          <option value="pillow" />
+          <option value="openai" />
+        </list>
+      </option>
+    </inspection_tool>
+    <inspection_tool class="PyTupleAssignmentBalanceInspection" enabled="false" level="WARNING" enabled_by_default="false" />
+  </profile>
+</component>
