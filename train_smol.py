@@ -137,12 +137,17 @@ def main() -> None:
         tokenizer.pad_token = tokenizer.eos_token
 
     def tokenize(example: dict) -> dict:
-        return tokenizer(
+        tokenized = tokenizer(
             example["text"],
             truncation=True,
             max_length=CFG.max_seq_length,
             padding=False,
         )
+
+        return {
+            "input_ids": tokenized["input_ids"],
+            "attention_mask": tokenized["attention_mask"],
+        }
 
     print("Loading model in 4-bit...")
 
@@ -194,14 +199,26 @@ def main() -> None:
         token=token,
     )
 
+    # Keep original column names so we can remove metadata later.
+    original_columns = list(raw.features.keys()) if raw.features is not None else []
+
     raw = raw.map(clean_text)
     raw = raw.filter(lambda x: x["text"] != "")
 
     train_stream = raw.take(CFG.max_train_examples)
     eval_stream = raw.skip(CFG.max_train_examples).take(CFG.max_eval_examples)
 
-    train_dataset = train_stream.map(tokenize)
-    eval_dataset = eval_stream.map(tokenize)
+    columns_to_remove = original_columns + ["text"]
+
+    train_dataset = train_stream.map(
+        tokenize,
+        remove_columns=columns_to_remove,
+    )
+
+    eval_dataset = eval_stream.map(
+        tokenize,
+        remove_columns=columns_to_remove,
+    )
 
     collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer,
