@@ -107,13 +107,39 @@ class TemporalAdapterBank(nn.Module):
         hidden_states: torch.Tensor,
         period_ids: torch.Tensor,
     ) -> torch.Tensor:
-        output = torch.empty_like(hidden_states)
+        """
+        hidden_states: [batch, seq_len, hidden]
+        period_ids: [batch]
+        """
+
+        if hidden_states.dim() != 3:
+            raise ValueError(
+                f"Expected hidden_states to have shape [batch, seq_len, hidden], "
+                f"but got {tuple(hidden_states.shape)}"
+            )
+
+        if period_ids.dim() == 0:
+            period_ids = period_ids.unsqueeze(0)
+
+        period_ids = period_ids.to(hidden_states.device).long()
+
+        batch_size = hidden_states.shape[0]
+
+        if period_ids.shape[0] != batch_size:
+            raise ValueError(
+                f"period_ids batch size does not match hidden_states batch size: "
+                f"period_ids={tuple(period_ids.shape)}, "
+                f"hidden_states={tuple(hidden_states.shape)}"
+            )
+
+        output = hidden_states.clone()
 
         for period_id, adapter in enumerate(self.adapters):
             mask = period_ids == period_id
 
             if mask.any():
-                output[mask] = adapter(hidden_states[mask])
+                selected = hidden_states[mask, :, :]
+                output[mask, :, :] = adapter(selected)
 
         return output
 

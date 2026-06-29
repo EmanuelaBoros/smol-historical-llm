@@ -265,7 +265,9 @@ def main() -> None:
         save_total_limit=2,
         fp16=torch.cuda.is_available(),
         report_to="none",
-        push_to_hub=False,
+        push_to_hub=True,
+        hub_model_id=CFG.output_repo,
+        hub_token=token,
         remove_unused_columns=False,
     )
 
@@ -285,7 +287,12 @@ def main() -> None:
     trainer.save_model(CFG.output_dir)
     tokenizer.save_pretrained(CFG.output_dir)
 
-    print(f"Done. Saved to: {CFG.output_dir}")
+    print("Pushing model and tokenizer to the Hub...")
+    model.base.config.save_pretrained(CFG.output_dir)
+    trainer.push_to_hub()
+    tokenizer.push_to_hub(CFG.output_repo, token=token)
+
+    print(f"Done. Model pushed to: {CFG.output_repo}")
 
 
 if __name__ == "__main__":
