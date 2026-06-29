@@ -7,7 +7,6 @@ import torch.nn as nn
 from transformers import AutoModelForMaskedLM
 from transformers.modeling_outputs import MaskedLMOutput
 
-
 PERIODS = [
     "pre_1850",
     "1850_1899",
@@ -49,11 +48,7 @@ class TemporalAdapter(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return hidden_states + self.up(
-            self.dropout(
-                self.activation(
-                    self.down(hidden_states)
-                )
-            )
+            self.dropout(self.activation(self.down(hidden_states)))
         )
 
 
@@ -113,12 +108,14 @@ class TemporalAdapterBank(nn.Module):
 
 class HistoricalTemporalBertForMLM(nn.Module):
     """
-    Stable version:
+    Stable memory-efficient version:
 
     input
-      -> BERT encoder
+      -> frozen BERT encoder
       -> temporal adapter selected by document date
       -> MLM head
+
+    By default, BERT is frozen and only temporal adapters + MLM head are trained.
     """
 
     def __init__(
@@ -127,6 +124,8 @@ class HistoricalTemporalBertForMLM(nn.Module):
         num_periods: int = len(PERIODS),
         adapter_bottleneck_size: int = 64,
         adapter_dropout: float = 0.1,
+        freeze_base: bool = True,
+        train_mlm_head: bool = True,
     ):
         super().__init__()
 
@@ -141,6 +140,15 @@ class HistoricalTemporalBertForMLM(nn.Module):
         )
 
         self.num_periods = num_periods
+        self.freeze_base = freeze_base
+
+        if freeze_base:
+            for param in self.base.bert.parameters():
+                param.requires_grad = False
+
+        if not train_mlm_head:
+            for param in self.base.cls.parameters():
+                param.requires_grad = False
 
     @property
     def config(self):
@@ -151,6 +159,20 @@ class HistoricalTemporalBertForMLM(nn.Module):
 
     def set_input_embeddings(self, value):
         return self.base.set_input_embeddings(value)
+
+    def print_trainable_parameters(self):
+        trainable = 0
+        total = 0
+
+        for _, param in self.named_parameters():
+            total += param.numel()
+            if param.requires_grad:
+                trainable += param.numel()
+
+        print(
+            f"Trainable parameters: {trainable:,} / {total:,} "
+            f"({100 * trainable / total:.2f}%)"
+        )
 
     def forward(
         self,
@@ -184,12 +206,21 @@ class HistoricalTemporalBertForMLM(nn.Module):
 
         period_ids = period_ids.to(input_ids.device).long()
 
-        bert_outputs = self.base.bert(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            token_type_ids=token_type_ids,
-            return_dict=True,
-        )
+        if self.freeze_base:
+            with torch.no_grad():
+                bert_outputs = self.base.bert(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    token_type_ids=token_type_ids,
+                    return_dict=True,
+                )
+        else:
+            bert_outputs = self.base.bert(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                token_type_ids=token_type_ids,
+                return_dict=True,
+            )
 
         sequence_output = bert_outputs.last_hidden_state
 

@@ -403,7 +403,11 @@ def main() -> None:
         base_model_name=CFG.base_model,
         adapter_bottleneck_size=CFG.adapter_bottleneck_size,
         adapter_dropout=CFG.adapter_dropout,
+        freeze_base=True,
+        train_mlm_head=True,
     )
+
+    model.print_trainable_parameters()
 
     print("Loading dataset...")
     raw = load_dataset(
@@ -471,27 +475,21 @@ def main() -> None:
 
     training_args = TrainingArguments(
         output_dir=CFG.output_dir,
-
         max_steps=CFG.max_steps,
         per_device_train_batch_size=CFG.batch_size,
         per_device_eval_batch_size=CFG.eval_batch_size,
         gradient_accumulation_steps=CFG.grad_accum,
-
         learning_rate=CFG.learning_rate,
         warmup_steps=CFG.warmup_steps,
         logging_steps=CFG.logging_steps,
-
         # Critical: no eval and no checkpoint save during Trainer training.
         # Otherwise Trainer tries to save with safetensors and crashes on tied BERT weights.
         eval_strategy="no",
         save_strategy="no",
-
         fp16=torch.cuda.is_available(),
         report_to="none",
-
         # Critical: do not let Trainer push/save.
         push_to_hub=False,
-
         remove_unused_columns=False,
         prediction_loss_only=True,
     )
