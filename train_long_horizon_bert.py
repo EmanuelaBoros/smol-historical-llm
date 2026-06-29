@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import os
 from dataclasses import dataclass
 
@@ -7,12 +8,11 @@ import torch
 from datasets import load_dataset
 from transformers import (
     AutoTokenizer,
-    DataCollatorForLanguageModeling,
     Trainer,
     TrainingArguments,
 )
-from collator_temporal_mlm import TemporalDataCollatorForMLM
 
+from collator_temporal_mlm import TemporalDataCollatorForMLM
 from modeling_temporal_bert import (
     HistoricalTemporalBertForMLM,
     year_to_period_id,
@@ -25,59 +25,269 @@ from modeling_temporal_bert import (
 
 @dataclass
 class Config:
-    base_model: str = os.environ.get(
-        "BASE_MODEL",
-        "dbmdz/bert-base-french-europeana-cased",
+    # Model
+    base_model: str
+
+    # Dataset
+    dataset_name: str
+    dataset_split: str
+    text_column: str
+    date_column: str
+    ocr_column: str
+
+    # Output
+    output_dir: str
+    output_repo: str
+    push_to_hub: bool
+
+    # Training size
+    max_seq_length: int
+    max_train_examples: int
+    max_eval_examples: int
+    max_steps: int
+
+    # Optimization
+    batch_size: int
+    eval_batch_size: int
+    grad_accum: int
+    learning_rate: float
+    warmup_steps: int
+
+    # MLM
+    mlm_probability: float
+
+    # Adapter
+    adapter_bottleneck_size: int
+    adapter_dropout: float
+
+    # Text filtering
+    min_chars: int
+    max_chars: int
+    min_ocr: int | None
+
+    # Optional temporal filtering
+    start_year: int | None
+    end_year: int | None
+
+    # Logging / saving
+    logging_steps: int
+    eval_steps: int
+    save_steps: int
+
+    # Debug
+    check_batch: bool
+
+
+def str2bool(value: str | bool) -> bool:
+    if isinstance(value, bool):
+        return value
+
+    value = value.lower()
+
+    if value in {"yes", "true", "t", "1", "y"}:
+        return True
+
+    if value in {"no", "false", "f", "0", "n"}:
+        return False
+
+    raise argparse.ArgumentTypeError(f"Invalid boolean value: {value}")
+
+
+def optional_int(value: str | None) -> int | None:
+    if value is None or value == "":
+        return None
+    return int(value)
+
+
+def parse_args() -> Config:
+    parser = argparse.ArgumentParser(
+        description="Train a long-horizon historical BERT with temporal adapters."
     )
 
-    dataset_name: str = os.environ.get(
-        "DATASET_NAME",
-        "PleIAs/French-PD-Newspapers",
-    )
-    dataset_split: str = os.environ.get("DATASET_SPLIT", "train")
-
-    text_column: str = os.environ.get("TEXT_COLUMN", "complete_text")
-    date_column: str = os.environ.get("DATE_COLUMN", "date")
-    ocr_column: str = os.environ.get("OCR_COLUMN", "ocr")
-
-    output_dir: str = os.environ.get(
-        "OUTPUT_DIR",
-        "long-horizon-historical-bert",
-    )
-    output_repo: str = os.environ.get(
-        "OUTPUT_REPO",
-        "EmanuelaBoros/long-horizon-historical-bert",
+    # Model
+    parser.add_argument(
+        "--base_model",
+        default=os.environ.get(
+            "BASE_MODEL",
+            "dbmdz/bert-base-french-europeana-cased",
+        ),
     )
 
-    max_seq_length: int = int(os.environ.get("MAX_SEQ_LENGTH", "512"))
-    max_train_examples: int = int(os.environ.get("MAX_TRAIN_EXAMPLES", "50000"))
-    max_eval_examples: int = int(os.environ.get("MAX_EVAL_EXAMPLES", "2000"))
-    max_steps: int = int(os.environ.get("MAX_STEPS", "3000"))
-
-    batch_size: int = int(os.environ.get("BATCH_SIZE", "8"))
-    eval_batch_size: int = int(os.environ.get("EVAL_BATCH_SIZE", "8"))
-    grad_accum: int = int(os.environ.get("GRAD_ACCUM", "4"))
-
-    learning_rate: float = float(os.environ.get("LR", "5e-5"))
-    warmup_steps: int = int(os.environ.get("WARMUP_STEPS", "200"))
-
-    mlm_probability: float = float(os.environ.get("MLM_PROBABILITY", "0.15"))
-
-    adapter_bottleneck_size: int = int(os.environ.get("ADAPTER_BOTTLENECK", "64"))
-    adapter_dropout: float = float(os.environ.get("ADAPTER_DROPOUT", "0.1"))
-
-    min_chars: int = int(os.environ.get("MIN_CHARS", "500"))
-    max_chars: int = int(os.environ.get("MAX_CHARS", "12000"))
-    min_ocr: int | None = (
-        int(os.environ["MIN_OCR"]) if os.environ.get("MIN_OCR") else None
+    # Dataset
+    parser.add_argument(
+        "--dataset_name",
+        default=os.environ.get(
+            "DATASET_NAME",
+            "PleIAs/French-PD-Newspapers",
+        ),
+    )
+    parser.add_argument(
+        "--dataset_split",
+        default=os.environ.get("DATASET_SPLIT", "train"),
+    )
+    parser.add_argument(
+        "--text_column",
+        default=os.environ.get("TEXT_COLUMN", "complete_text"),
+    )
+    parser.add_argument(
+        "--date_column",
+        default=os.environ.get("DATE_COLUMN", "date"),
+    )
+    parser.add_argument(
+        "--ocr_column",
+        default=os.environ.get("OCR_COLUMN", "ocr"),
     )
 
-    logging_steps: int = int(os.environ.get("LOGGING_STEPS", "20"))
-    eval_steps: int = int(os.environ.get("EVAL_STEPS", "500"))
-    save_steps: int = int(os.environ.get("SAVE_STEPS", "500"))
+    # Output
+    parser.add_argument(
+        "--output_dir",
+        default=os.environ.get(
+            "OUTPUT_DIR",
+            "long-horizon-historical-bert",
+        ),
+    )
+    parser.add_argument(
+        "--output_repo",
+        default=os.environ.get(
+            "OUTPUT_REPO",
+            "EmanuelaBoros/long-horizon-historical-bert",
+        ),
+    )
+    parser.add_argument(
+        "--push_to_hub",
+        type=str2bool,
+        default=str2bool(os.environ.get("PUSH_TO_HUB", "true")),
+    )
+
+    # Training size
+    parser.add_argument(
+        "--max_seq_length",
+        type=int,
+        default=int(os.environ.get("MAX_SEQ_LENGTH", "512")),
+    )
+    parser.add_argument(
+        "--max_train_examples",
+        type=int,
+        default=int(os.environ.get("MAX_TRAIN_EXAMPLES", "50000")),
+    )
+    parser.add_argument(
+        "--max_eval_examples",
+        type=int,
+        default=int(os.environ.get("MAX_EVAL_EXAMPLES", "2000")),
+    )
+    parser.add_argument(
+        "--max_steps",
+        type=int,
+        default=int(os.environ.get("MAX_STEPS", "3000")),
+    )
+
+    # Optimization
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=int(os.environ.get("BATCH_SIZE", "8")),
+    )
+    parser.add_argument(
+        "--eval_batch_size",
+        type=int,
+        default=int(os.environ.get("EVAL_BATCH_SIZE", "8")),
+    )
+    parser.add_argument(
+        "--grad_accum",
+        type=int,
+        default=int(os.environ.get("GRAD_ACCUM", "4")),
+    )
+    parser.add_argument(
+        "--learning_rate",
+        "--lr",
+        type=float,
+        default=float(os.environ.get("LR", "5e-5")),
+    )
+    parser.add_argument(
+        "--warmup_steps",
+        type=int,
+        default=int(os.environ.get("WARMUP_STEPS", "200")),
+    )
+
+    # MLM
+    parser.add_argument(
+        "--mlm_probability",
+        type=float,
+        default=float(os.environ.get("MLM_PROBABILITY", "0.15")),
+    )
+
+    # Adapter
+    parser.add_argument(
+        "--adapter_bottleneck_size",
+        "--adapter_bottleneck",
+        type=int,
+        default=int(os.environ.get("ADAPTER_BOTTLENECK", "64")),
+    )
+    parser.add_argument(
+        "--adapter_dropout",
+        type=float,
+        default=float(os.environ.get("ADAPTER_DROPOUT", "0.1")),
+    )
+
+    # Text filtering
+    parser.add_argument(
+        "--min_chars",
+        type=int,
+        default=int(os.environ.get("MIN_CHARS", "500")),
+    )
+    parser.add_argument(
+        "--max_chars",
+        type=int,
+        default=int(os.environ.get("MAX_CHARS", "12000")),
+    )
+    parser.add_argument(
+        "--min_ocr",
+        type=optional_int,
+        default=optional_int(os.environ.get("MIN_OCR")),
+    )
+
+    # Temporal filtering
+    parser.add_argument(
+        "--start_year",
+        type=optional_int,
+        default=optional_int(os.environ.get("START_YEAR")),
+    )
+    parser.add_argument(
+        "--end_year",
+        type=optional_int,
+        default=optional_int(os.environ.get("END_YEAR")),
+    )
+
+    # Logging / saving
+    parser.add_argument(
+        "--logging_steps",
+        type=int,
+        default=int(os.environ.get("LOGGING_STEPS", "20")),
+    )
+    parser.add_argument(
+        "--eval_steps",
+        type=int,
+        default=int(os.environ.get("EVAL_STEPS", "500")),
+    )
+    parser.add_argument(
+        "--save_steps",
+        type=int,
+        default=int(os.environ.get("SAVE_STEPS", "500")),
+    )
+
+    # Debug
+    parser.add_argument(
+        "--check_batch",
+        type=str2bool,
+        default=str2bool(os.environ.get("CHECK_BATCH", "true")),
+    )
+
+    args = parser.parse_args()
+
+    return Config(**vars(args))
 
 
-CFG = Config()
+CFG = parse_args()
 
 
 # ---------------------------------------------------------------------
@@ -122,6 +332,21 @@ def keep_by_ocr(example: dict) -> bool:
         return int(value) >= CFG.min_ocr
     except ValueError:
         return False
+
+
+def keep_by_year(example: dict) -> bool:
+    year = parse_year(example.get(CFG.date_column))
+
+    if year is None:
+        return False
+
+    if CFG.start_year is not None and year < CFG.start_year:
+        return False
+
+    if CFG.end_year is not None and year > CFG.end_year:
+        return False
+
+    return True
 
 
 def clean_and_add_period(example: dict) -> dict:
@@ -207,6 +432,10 @@ def main() -> None:
 
     raw = raw.filter(keep_by_ocr)
 
+    if CFG.start_year is not None or CFG.end_year is not None:
+        print("Filtering by year...")
+        raw = raw.filter(keep_by_year)
+
     print("Cleaning text and assigning temporal period...")
     raw = raw.map(clean_and_add_period)
     raw = raw.filter(lambda x: x["text"] != "")
@@ -244,11 +473,6 @@ def main() -> None:
         tokenizer=tokenizer,
         mlm_probability=CFG.mlm_probability,
     )
-    # collator = DataCollatorForLanguageModeling(
-    #     tokenizer=tokenizer,
-    #     mlm=True,
-    #     mlm_probability=CFG.mlm_probability,
-    # )
 
     training_args = TrainingArguments(
         output_dir=CFG.output_dir,
@@ -265,9 +489,9 @@ def main() -> None:
         save_total_limit=2,
         fp16=torch.cuda.is_available(),
         report_to="none",
-        push_to_hub=True,
-        hub_model_id=CFG.output_repo,
-        hub_token=token,
+        push_to_hub=CFG.push_to_hub,
+        hub_model_id=CFG.output_repo if CFG.push_to_hub else None,
+        hub_token=token if CFG.push_to_hub else None,
         remove_unused_columns=False,
     )
 
@@ -280,17 +504,18 @@ def main() -> None:
         processing_class=tokenizer,
     )
 
-    print("Checking one batch...")
+    if CFG.check_batch:
+        print("Checking one batch...")
 
-    batch = next(iter(trainer.get_train_dataloader()))
+        batch = next(iter(trainer.get_train_dataloader()))
 
-    for key, value in batch.items():
-        if hasattr(value, "shape"):
-            print(key, value.shape)
-        else:
-            print(key, type(value))
+        for key, value in batch.items():
+            if hasattr(value, "shape"):
+                print(key, value.shape)
+            else:
+                print(key, type(value))
 
-    print("Batch check done.")
+        print("Batch check done.")
 
     print("Starting long-horizon temporal adapter training...")
     trainer.train()
@@ -299,12 +524,14 @@ def main() -> None:
     trainer.save_model(CFG.output_dir)
     tokenizer.save_pretrained(CFG.output_dir)
 
-    print("Pushing model and tokenizer to the Hub...")
-    model.base.config.save_pretrained(CFG.output_dir)
-    trainer.push_to_hub()
-    tokenizer.push_to_hub(CFG.output_repo, token=token)
-
-    print(f"Done. Model pushed to: {CFG.output_repo}")
+    if CFG.push_to_hub:
+        print("Pushing model and tokenizer to the Hub...")
+        model.base.config.save_pretrained(CFG.output_dir)
+        trainer.push_to_hub()
+        tokenizer.push_to_hub(CFG.output_repo, token=token)
+        print(f"Done. Model pushed to: {CFG.output_repo}")
+    else:
+        print(f"Done. Model saved locally to: {CFG.output_dir}")
 
 
 if __name__ == "__main__":
