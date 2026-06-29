@@ -484,6 +484,7 @@ def main() -> None:
         warmup_steps=CFG.warmup_steps,
         logging_steps=CFG.logging_steps,
         eval_strategy="no",
+        save_safetensors=False,
         save_steps=CFG.save_steps,
         save_total_limit=2,
         fp16=torch.cuda.is_available(),
