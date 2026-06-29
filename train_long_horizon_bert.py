@@ -280,6 +280,18 @@ def main() -> None:
         processing_class=tokenizer,
     )
 
+    print("Checking one batch...")
+
+    batch = next(iter(trainer.get_train_dataloader()))
+
+    for key, value in batch.items():
+        if hasattr(value, "shape"):
+            print(key, value.shape)
+        else:
+            print(key, type(value))
+
+    print("Batch check done.")
+
     print("Starting long-horizon temporal adapter training...")
     trainer.train()
 
