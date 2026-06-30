@@ -28,6 +28,15 @@ from transformers import (
 
 from modeling_temporal_bert import TemporalAdapterBank, PERIODS, year_to_period_id
 
+try:
+    from modeling_temporal_bert_v2 import (
+        TemporalAdapterBank as TemporalAdapterBankV2,
+        PERIODS as PERIODS_V2,
+    )
+except ImportError:
+    TemporalAdapterBankV2 = None
+    PERIODS_V2 = None
+
 
 # ---------------------------------------------------------------------
 # HIPE reader
@@ -65,15 +74,6 @@ def read_hipe_tsv(path: str, label_column: str = "NE-COARSE-LIT") -> list[dict]:
     - blank lines
     - MISC containing EndOfSentence
     - new document_id metadata if tokens are already buffered
-
-    Returns one example per sentence/span:
-    {
-        "tokens": [...],
-        "labels": [...],
-        "date": "...",
-        "period_id": int,
-        "document_id": "...",
-    }
     """
 
     examples = []
@@ -279,7 +279,7 @@ class TemporalTokenClassificationCollator:
 
 
 # ---------------------------------------------------------------------
-# Temporal BERT for NER
+# Temporal BERT v1 for NER
 # ---------------------------------------------------------------------
 
 
@@ -326,7 +326,7 @@ class TemporalBertForTokenClassification(nn.Module):
                 param.requires_grad = False
 
     def _load_temporal_weights(self, temporal_model_id: str, token: str | None = None):
-        print(f"Downloading/loading temporal model: {temporal_model_id}")
+        print(f"Downloading/loading temporal v1 model: {temporal_model_id}")
 
         local_dir = snapshot_download(
             repo_id=temporal_model_id,
@@ -459,6 +459,224 @@ class TemporalBertForTokenClassification(nn.Module):
 
 
 # ---------------------------------------------------------------------
+# Temporal BERT v2 for NER
+# ---------------------------------------------------------------------
+
+
+class TemporalBertV2ForTokenClassification(nn.Module):
+    def __init__(
+        self,
+        base_model: str,
+        temporal_model_id: str,
+        num_labels: int,
+        id2label: dict[int, str],
+        label2id: dict[str, int],
+        adapter_bottleneck_size: int = 64,
+        adapter_dropout: float = 0.1,
+        freeze_base: bool = False,
+        token: str | None = None,
+    ):
+        super().__init__()
+
+        if TemporalAdapterBankV2 is None or PERIODS_V2 is None:
+            raise ImportError(
+                "Could not import modeling_temporal_bert_v2.py. "
+                "Make sure it exists in the repository."
+            )
+
+        self.config = AutoConfig.from_pretrained(base_model, token=token)
+        self.config.num_labels = num_labels
+        self.config.id2label = id2label
+        self.config.label2id = label2id
+
+        self.num_periods = len(PERIODS_V2)
+
+        self.bert = AutoModel.from_pretrained(base_model, token=token)
+
+        self.period_embeddings = nn.Embedding(
+            self.num_periods,
+            self.config.hidden_size,
+        )
+
+        self.period_layer_norm = nn.LayerNorm(self.config.hidden_size)
+        self.period_dropout = nn.Dropout(adapter_dropout)
+
+        self.temporal_adapter_bank = TemporalAdapterBankV2(
+            hidden_size=self.config.hidden_size,
+            num_periods=self.num_periods,
+            bottleneck_size=adapter_bottleneck_size,
+            dropout=adapter_dropout,
+        )
+
+        self.dropout = nn.Dropout(0.1)
+        self.classifier = nn.Linear(self.config.hidden_size, num_labels)
+        self.num_labels = num_labels
+
+        self._load_temporal_v2_weights(
+            temporal_model_id=temporal_model_id,
+            token=token,
+        )
+
+        if freeze_base:
+            for param in self.bert.parameters():
+                param.requires_grad = False
+
+    def _load_temporal_v2_weights(
+        self,
+        temporal_model_id: str,
+        token: str | None = None,
+    ):
+        print(f"Downloading/loading temporal v2 model: {temporal_model_id}")
+
+        local_dir = snapshot_download(
+            repo_id=temporal_model_id,
+            token=token,
+        )
+
+        local_dir = Path(local_dir)
+        full_bin_path = local_dir / "pytorch_model.bin"
+
+        if not full_bin_path.exists():
+            raise FileNotFoundError(
+                f"No pytorch_model.bin found in {temporal_model_id}"
+            )
+
+        print(f"Loading v2 checkpoint from {full_bin_path}")
+        state = torch.load(full_bin_path, map_location="cpu")
+
+        bert_state = {}
+        for key, value in state.items():
+            if key.startswith("base.bert."):
+                bert_state[key.replace("base.bert.", "")] = value
+
+        if bert_state:
+            missing, unexpected = self.bert.load_state_dict(
+                bert_state,
+                strict=False,
+            )
+            print(f"BERT missing keys: {len(missing)}")
+            print(f"BERT unexpected keys: {len(unexpected)}")
+        else:
+            print("WARNING: no base.bert.* keys found.")
+
+        adapter_state = {}
+        for key, value in state.items():
+            if key.startswith("temporal_adapter_bank."):
+                adapter_state[key.replace("temporal_adapter_bank.", "")] = value
+
+        if adapter_state:
+            missing, unexpected = self.temporal_adapter_bank.load_state_dict(
+                adapter_state,
+                strict=False,
+            )
+            print(f"Adapter missing keys: {len(missing)}")
+            print(f"Adapter unexpected keys: {len(unexpected)}")
+        else:
+            print("WARNING: no temporal_adapter_bank.* keys found.")
+
+        period_embedding_state = {}
+        for key, value in state.items():
+            if key.startswith("period_embeddings."):
+                period_embedding_state[key.replace("period_embeddings.", "")] = value
+
+        if period_embedding_state:
+            missing, unexpected = self.period_embeddings.load_state_dict(
+                period_embedding_state,
+                strict=False,
+            )
+            print(f"Period embedding missing keys: {len(missing)}")
+            print(f"Period embedding unexpected keys: {len(unexpected)}")
+        else:
+            print("WARNING: no period_embeddings.* keys found.")
+
+        period_ln_state = {}
+        for key, value in state.items():
+            if key.startswith("period_layer_norm."):
+                period_ln_state[key.replace("period_layer_norm.", "")] = value
+
+        if period_ln_state:
+            missing, unexpected = self.period_layer_norm.load_state_dict(
+                period_ln_state,
+                strict=False,
+            )
+            print(f"Period LayerNorm missing keys: {len(missing)}")
+            print(f"Period LayerNorm unexpected keys: {len(unexpected)}")
+        else:
+            print("WARNING: no period_layer_norm.* keys found.")
+
+    def print_trainable_parameters(self):
+        total = 0
+        trainable = 0
+
+        for _, param in self.named_parameters():
+            total += param.numel()
+            if param.requires_grad:
+                trainable += param.numel()
+
+        print(
+            f"Trainable parameters: {trainable:,} / {total:,} "
+            f"({100 * trainable / total:.2f}%)"
+        )
+
+    def forward(
+        self,
+        input_ids,
+        attention_mask=None,
+        labels=None,
+        period_ids=None,
+        token_type_ids=None,
+    ):
+        batch_size = input_ids.shape[0]
+
+        if period_ids is None:
+            period_ids = torch.zeros(
+                batch_size,
+                dtype=torch.long,
+                device=input_ids.device,
+            )
+
+        period_ids = period_ids.to(input_ids.device).long()
+
+        outputs = self.bert(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            return_dict=True,
+        )
+
+        sequence_output = outputs.last_hidden_state
+
+        period_emb = self.period_embeddings(period_ids)
+        period_emb = period_emb[:, None, :]
+
+        sequence_output = self.period_layer_norm(
+            sequence_output + self.period_dropout(period_emb)
+        )
+
+        sequence_output = self.temporal_adapter_bank(
+            hidden_states=sequence_output,
+            period_ids=period_ids,
+        )
+
+        sequence_output = self.dropout(sequence_output)
+        logits = self.classifier(sequence_output)
+
+        loss = None
+
+        if labels is not None:
+            loss_fct = nn.CrossEntropyLoss()
+            loss = loss_fct(
+                logits.view(-1, self.num_labels),
+                labels.view(-1),
+            )
+
+        return {
+            "loss": loss,
+            "logits": logits,
+        }
+
+
+# ---------------------------------------------------------------------
 # Metrics
 # ---------------------------------------------------------------------
 
@@ -543,12 +761,7 @@ def compute_seqeval_metrics(true_labels, true_predictions) -> dict:
         "f1": float(f1_score(true_labels, true_predictions)),
         "num_sentences": len(true_labels),
         "num_entities": int(
-            sum(
-                1
-                for sent in true_labels
-                for label in sent
-                if label.startswith("B-")
-            )
+            sum(1 for sent in true_labels for label in sent if label.startswith("B-"))
         ),
     }
 
@@ -667,7 +880,9 @@ def pretty_print_dataset_stats(
 
     print("Period distribution:")
     for period_id, count in sorted(period_counts.items()):
-        period_name = PERIODS[period_id] if 0 <= period_id < len(PERIODS) else str(period_id)
+        period_name = (
+            PERIODS[period_id] if 0 <= period_id < len(PERIODS) else str(period_id)
+        )
         print(f"  {period_id} ({period_name}): {count}")
 
     print("Label distribution:")
@@ -712,7 +927,12 @@ def main():
 
     parser.add_argument(
         "--mode",
-        choices=["normal_bert", "year_concat_bert", "temporal_bert"],
+        choices=[
+            "normal_bert",
+            "year_concat_bert",
+            "temporal_bert",
+            "temporal_bert_v2",
+        ],
         required=True,
     )
 
@@ -724,7 +944,7 @@ def main():
     parser.add_argument(
         "--temporal_model_id",
         default=None,
-        help="HF repo/path for temporal model. Required for temporal_bert.",
+        help="HF repo/path for temporal model. Required for temporal modes.",
     )
 
     parser.add_argument("--train_file", required=True)
@@ -752,8 +972,9 @@ def main():
 
     args = parser.parse_args()
 
-    if args.mode == "temporal_bert" and args.temporal_model_id is None:
-        raise ValueError("--temporal_model_id is required for temporal_bert")
+    if args.mode in {"temporal_bert", "temporal_bert_v2"}:
+        if args.temporal_model_id is None:
+            raise ValueError("--temporal_model_id is required for temporal modes")
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -805,7 +1026,7 @@ def main():
             }
         )
 
-    include_period_ids = args.mode == "temporal_bert"
+    include_period_ids = args.mode in {"temporal_bert", "temporal_bert_v2"}
 
     train_dataset = HipeNERDataset(
         train_examples,
@@ -859,8 +1080,8 @@ def main():
             return_tensors="pt",
         )
 
-    else:
-        print("Loading temporal BERT for NER...")
+    elif args.mode == "temporal_bert":
+        print("Loading temporal BERT v1 for NER...")
 
         model = TemporalBertForTokenClassification(
             base_model=args.base_model,
@@ -877,6 +1098,28 @@ def main():
         model.print_trainable_parameters()
 
         collator = TemporalTokenClassificationCollator(tokenizer=tokenizer)
+
+    elif args.mode == "temporal_bert_v2":
+        print("Loading temporal BERT v2 for NER...")
+
+        model = TemporalBertV2ForTokenClassification(
+            base_model=args.base_model,
+            temporal_model_id=args.temporal_model_id,
+            num_labels=len(label2id),
+            id2label=id2label,
+            label2id=label2id,
+            adapter_bottleneck_size=args.adapter_bottleneck_size,
+            adapter_dropout=args.adapter_dropout,
+            freeze_base=args.freeze_base,
+            token=args.token,
+        )
+
+        model.print_trainable_parameters()
+
+        collator = TemporalTokenClassificationCollator(tokenizer=tokenizer)
+
+    else:
+        raise ValueError(f"Unknown mode: {args.mode}")
 
     training_args = TrainingArguments(
         output_dir=str(output_dir),
