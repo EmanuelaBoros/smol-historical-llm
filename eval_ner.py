@@ -28,6 +28,7 @@ from transformers import (
 
 from modeling_temporal_bert import TemporalAdapterBank, PERIODS, year_to_period_id
 
+
 # ---------------------------------------------------------------------
 # HIPE reader
 # ---------------------------------------------------------------------
@@ -36,10 +37,20 @@ from modeling_temporal_bert import TemporalAdapterBank, PERIODS, year_to_period_
 def parse_year(date_value: str | None) -> int | None:
     if not date_value:
         return None
+
     try:
         return int(str(date_value)[:4])
     except ValueError:
         return None
+
+
+def year_to_text_prefix(date_value: str | None) -> str:
+    year = parse_year(date_value)
+
+    if year is None:
+        return "[YEAR_UNK]"
+
+    return f"[YEAR={year}]"
 
 
 def read_hipe_tsv(path: str, label_column: str = "NE-COARSE-LIT") -> list[dict]:
@@ -104,15 +115,12 @@ def read_hipe_tsv(path: str, label_column: str = "NE-COARSE-LIT") -> list[dict]:
         for line in f:
             line = line.rstrip("\n")
 
-            # Blank line = sentence/document boundary
             if not line:
                 flush_sentence()
                 continue
 
-            # Metadata
             if line.startswith("#"):
                 if line.startswith("# hipe2022:document_id"):
-                    # If a new document starts without a blank line, flush previous tokens
                     flush_sentence()
                     current_doc_id = line.split("=", 1)[1].strip()
 
@@ -123,7 +131,6 @@ def read_hipe_tsv(path: str, label_column: str = "NE-COARSE-LIT") -> list[dict]:
 
             parts = line.split("\t")
 
-            # Header row
             if parts[0] == "TOKEN":
                 flush_sentence()
 
@@ -165,7 +172,6 @@ def read_hipe_tsv(path: str, label_column: str = "NE-COARSE-LIT") -> list[dict]:
                 else ""
             )
 
-            # HIPE sentence boundary
             if "EndOfSentence" in misc_value:
                 flush_sentence()
 
@@ -187,13 +193,25 @@ class HipeNERDataset(Dataset):
         label2id: dict[str, int],
         max_length: int = 256,
         include_period_ids: bool = False,
+        add_year_prefix: bool = False,
         label_all_tokens: bool = False,
     ):
         self.features = []
 
         for ex in examples:
+            if add_year_prefix:
+                year_prefix = year_to_text_prefix(ex.get("date"))
+
+                tokens = [year_prefix] + ex["tokens"]
+                word_labels = ["O"] + ex["labels"]
+                prefix_word_index = 0
+            else:
+                tokens = ex["tokens"]
+                word_labels = ex["labels"]
+                prefix_word_index = None
+
             tokenized = tokenizer(
-                ex["tokens"],
+                tokens,
                 is_split_into_words=True,
                 truncation=True,
                 max_length=max_length,
@@ -206,11 +224,16 @@ class HipeNERDataset(Dataset):
             for word_id in word_ids:
                 if word_id is None:
                     labels.append(-100)
+
+                elif add_year_prefix and word_id == prefix_word_index:
+                    labels.append(-100)
+
                 elif word_id != previous_word_id:
-                    labels.append(label2id[ex["labels"][word_id]])
+                    labels.append(label2id[word_labels[word_id]])
+
                 else:
                     if label_all_tokens:
-                        labels.append(label2id[ex["labels"][word_id]])
+                        labels.append(label2id[word_labels[word_id]])
                     else:
                         labels.append(-100)
 
@@ -318,10 +341,12 @@ class TemporalBertForTokenClassification(nn.Module):
         if adapter_path.exists():
             print(f"Loading adapter-only weights from {adapter_path}")
             adapter_state = torch.load(adapter_path, map_location="cpu")
+
             missing, unexpected = self.temporal_adapter_bank.load_state_dict(
                 adapter_state,
                 strict=False,
             )
+
             print(f"Adapter missing keys: {len(missing)}")
             print(f"Adapter unexpected keys: {len(unexpected)}")
             return
@@ -330,7 +355,6 @@ class TemporalBertForTokenClassification(nn.Module):
             print(f"Loading full temporal checkpoint from {full_bin_path}")
             state = torch.load(full_bin_path, map_location="cpu")
 
-            # Load adapted BERT encoder if it exists.
             bert_state = {}
             for key, value in state.items():
                 if key.startswith("base.bert."):
@@ -341,10 +365,12 @@ class TemporalBertForTokenClassification(nn.Module):
                     bert_state,
                     strict=False,
                 )
+
                 print(f"BERT missing keys: {len(missing)}")
                 print(f"BERT unexpected keys: {len(unexpected)}")
+            else:
+                print("WARNING: no base.bert.* keys found.")
 
-            # Load temporal adapter bank.
             adapter_state = {}
             for key, value in state.items():
                 if key.startswith("temporal_adapter_bank."):
@@ -355,6 +381,7 @@ class TemporalBertForTokenClassification(nn.Module):
                     adapter_state,
                     strict=False,
                 )
+
                 print(f"Adapter missing keys: {len(missing)}")
                 print(f"Adapter unexpected keys: {len(unexpected)}")
             else:
@@ -516,7 +543,12 @@ def compute_seqeval_metrics(true_labels, true_predictions) -> dict:
         "f1": float(f1_score(true_labels, true_predictions)),
         "num_sentences": len(true_labels),
         "num_entities": int(
-            sum(1 for sent in true_labels for label in sent if label.startswith("B-"))
+            sum(
+                1
+                for sent in true_labels
+                for label in sent
+                if label.startswith("B-")
+            )
         ),
     }
 
@@ -599,6 +631,57 @@ def print_period_metrics(period_metrics: dict) -> None:
     print("=" * 80)
 
 
+def pretty_print_dataset_stats(
+    name: str,
+    examples: list[dict],
+    label2id: dict[str, int] | None = None,
+) -> None:
+    num_examples = len(examples)
+    num_tokens = sum(len(ex["tokens"]) for ex in examples)
+
+    doc_ids = {ex.get("document_id") for ex in examples if ex.get("document_id")}
+    dates = [ex.get("date") for ex in examples if ex.get("date")]
+
+    label_counts = {}
+    period_counts = {}
+
+    for ex in examples:
+        period_id = ex.get("period_id", 0)
+        period_counts[period_id] = period_counts.get(period_id, 0) + 1
+
+        for label in ex["labels"]:
+            label_counts[label] = label_counts.get(label, 0) + 1
+
+    avg_len = num_tokens / num_examples if num_examples else 0.0
+    max_len = max((len(ex["tokens"]) for ex in examples), default=0)
+
+    print(f"\n===== {name} =====")
+    print(f"Examples/sentences: {num_examples}")
+    print(f"Documents: {len(doc_ids)}")
+    print(f"Tokens: {num_tokens}")
+    print(f"Average tokens/example: {avg_len:.2f}")
+    print(f"Max tokens/example: {max_len}")
+
+    if dates:
+        print(f"Date range: {min(dates)} -> {max(dates)}")
+
+    print("Period distribution:")
+    for period_id, count in sorted(period_counts.items()):
+        period_name = PERIODS[period_id] if 0 <= period_id < len(PERIODS) else str(period_id)
+        print(f"  {period_id} ({period_name}): {count}")
+
+    print("Label distribution:")
+    for label, count in sorted(label_counts.items(), key=lambda x: (-x[1], x[0])):
+        print(f"  {label}: {count}")
+
+    if label2id is not None:
+        missing = sorted(set(label_counts) - set(label2id))
+        if missing:
+            print(f"WARNING: labels missing from label2id: {missing}")
+
+    print("=" * 40)
+
+
 def save_json(path: Path, data: dict):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
@@ -629,7 +712,7 @@ def main():
 
     parser.add_argument(
         "--mode",
-        choices=["normal_bert", "temporal_bert"],
+        choices=["normal_bert", "year_concat_bert", "temporal_bert"],
         required=True,
     )
 
@@ -693,11 +776,34 @@ def main():
     print("Labels:")
     print(label2id)
 
+    pretty_print_dataset_stats("TRAIN", train_examples, label2id)
+    pretty_print_dataset_stats("DEV", dev_examples, label2id)
+    pretty_print_dataset_stats("TEST", test_examples, label2id)
+
     tokenizer = AutoTokenizer.from_pretrained(
         args.base_model,
         use_fast=True,
         token=args.token,
     )
+
+    add_year_prefix = args.mode == "year_concat_bert"
+
+    if add_year_prefix:
+        year_tokens = []
+
+        for dataset_examples in [train_examples, dev_examples, test_examples]:
+            for ex in dataset_examples:
+                year_tokens.append(year_to_text_prefix(ex.get("date")))
+
+        year_tokens = sorted(set(year_tokens))
+
+        print(f"Adding {len(year_tokens)} year prefix tokens to tokenizer.")
+
+        tokenizer.add_special_tokens(
+            {
+                "additional_special_tokens": year_tokens,
+            }
+        )
 
     include_period_ids = args.mode == "temporal_bert"
 
@@ -707,6 +813,7 @@ def main():
         label2id=label2id,
         max_length=args.max_length,
         include_period_ids=include_period_ids,
+        add_year_prefix=add_year_prefix,
     )
 
     dev_dataset = HipeNERDataset(
@@ -715,6 +822,7 @@ def main():
         label2id=label2id,
         max_length=args.max_length,
         include_period_ids=include_period_ids,
+        add_year_prefix=add_year_prefix,
     )
 
     test_dataset = HipeNERDataset(
@@ -723,10 +831,14 @@ def main():
         label2id=label2id,
         max_length=args.max_length,
         include_period_ids=include_period_ids,
+        add_year_prefix=add_year_prefix,
     )
 
-    if args.mode == "normal_bert":
-        print("Loading normal BERT for NER...")
+    if args.mode in {"normal_bert", "year_concat_bert"}:
+        if args.mode == "normal_bert":
+            print("Loading normal BERT for NER...")
+        else:
+            print("Loading year-concat BERT for NER...")
 
         model = AutoModelForTokenClassification.from_pretrained(
             args.base_model,
@@ -736,6 +848,10 @@ def main():
             ignore_mismatched_sizes=True,
             token=args.token,
         )
+
+        if args.mode == "year_concat_bert":
+            print("Resizing token embeddings for added year tokens.")
+            model.resize_token_embeddings(len(tokenizer))
 
         collator = DataCollatorForTokenClassification(
             tokenizer=tokenizer,
