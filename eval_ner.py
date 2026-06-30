@@ -565,12 +565,9 @@ def prediction_report_by_period(
     period_metrics = {}
 
     for period_name, values in grouped.items():
-        labels = values["labels"]
-        predictions = values["predictions"]
-
         period_metrics[period_name] = compute_seqeval_metrics(
-            true_labels=labels,
-            true_predictions=predictions,
+            true_labels=values["labels"],
+            true_predictions=values["predictions"],
         )
 
     return period_metrics
@@ -600,37 +597,6 @@ def print_period_metrics(period_metrics: dict) -> None:
         )
 
     print("=" * 80)
-
-
-def prediction_report(predictions, label_ids, id2label: dict[int, str]):
-    pred_ids = np.argmax(predictions, axis=-1)
-
-    true_predictions = []
-    true_labels = []
-
-    for pred_seq, label_seq in zip(pred_ids, label_ids):
-        current_preds = []
-        current_labels = []
-
-        for pred_id, label_id in zip(pred_seq, label_seq):
-            if label_id == -100:
-                continue
-
-            current_preds.append(id2label[int(pred_id)])
-            current_labels.append(id2label[int(label_id)])
-
-        true_predictions.append(current_preds)
-        true_labels.append(current_labels)
-
-    metrics = {
-        "precision": precision_score(true_labels, true_predictions),
-        "recall": recall_score(true_labels, true_predictions),
-        "f1": f1_score(true_labels, true_predictions),
-    }
-
-    report = classification_report(true_labels, true_predictions)
-
-    return metrics, report
 
 
 def save_json(path: Path, data: dict):
@@ -851,8 +817,6 @@ def main():
     save_json(output_dir / "test_metrics.json", test_metrics)
     save_json(output_dir / "test_metrics_by_period.json", period_metrics)
 
-    print_period_metrics(period_metrics)
-
     with open(
         output_dir / "test_classification_report.txt", "w", encoding="utf-8"
     ) as f:
@@ -873,6 +837,8 @@ def main():
     print("Test metrics:")
     print(test_metrics)
     print(test_report)
+
+    print_period_metrics(period_metrics)
 
     print(f"Done. Results saved to {output_dir}")
 
